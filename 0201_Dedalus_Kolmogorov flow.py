@@ -1,16 +1,15 @@
 import numpy as np
 import dedalus.public as d3
 import logging
-#import math
 
 logger = logging.getLogger(__name__)
 
-Lx, Ly = 4, 1
-Nx, Ny = 256, 64
-dealias = 3/2
-stop_sim_time = 2
+Lx, Ly = 4*np.pi, 2*np.pi
+Nx, Ny = 256, 128
+dealias = 1
+stop_sim_time = 1.5e5
 timestepper = d3.RK222
-max_timestep = 1e-2
+max_timestep = 1
 dtype = np.float64
 
 coords = d3.CartesianCoordinates('x', 'y')
@@ -18,65 +17,91 @@ dist = d3.Distributor(coords, dtype=dtype)
 xbasis = d3.RealFourier(coords['x'], size=Nx, bounds=(-Lx/2, Lx/2), dealias=dealias)
 ybasis = d3.RealFourier(coords['y'], size=Ny, bounds=(-Ly/2, Ly/2), dealias=dealias)
 
-#tau=dist.VectorField(coords, name='tau', bases=(xbasis, ybasis))
-#Re = dist.Field(name='Re', bases=(xbasis, ybasis))
-u = dist.VectorField(coords, name='u', bases=(xbasis, ybasis))
-#omega = dist.Field(name='omega', bases=(xbasis, ybasis))
-#y_field = dist.Field(name='y_field', bases=(xbasis, ybasis))
+tau_psi=dist.Field(name='tau_psi')
+psi_prime = dist.Field(name='psi_prime', bases=(xbasis, ybasis))
+psi_bar = dist.Field(name='psi_bar', bases=(xbasis, ybasis))
 costerm = dist.Field(name='costerm', bases=(xbasis, ybasis))
 
-x, y = dist.local_grids(xbasis, ybasis)
+x_grid, y_grid = dist.local_grids(xbasis, ybasis)
 ex, ey = coords.unit_vector_fields(dist)
+
+alpha=Ly/Lx
 n=4
-nv=10        #???
-chi=2       #???
-#costerm=n*np.cos(n*coords['y'])
-y_grid = dist.local_grid(ybasis)
-Re=np.sqrt(chi)/nv*(Ly/2/np.pi)**1.5
+Rec=2**0.25*n**(3/2)*(1+3*alpha**2/(4*n**2))
 
-#def gradiant(f):
-#    return (d3.Differentiate(f, coords['x']) , d3.Differentiate(f, coords['y']) )
-#def gradient_tensor(f):
-#    fx, fy = f['g'][0], f['g'][1]
-#    return [[d3.Differentiate(f['g'][0], coords['x']), d3.Differentiate(f['g'][0], coords['y'])],
-#            [d3.Differentiate(f['g'][1], coords['x']), d3.Differentiate(f['g'][1], coords['y'])]]
-#def laplacian(f):
-#    return (d3.Differentiate(d3.Differentiate(f, coords['x']), coords['x']) + d3.Differentiate(d3.Differentiate(f, coords['y']), coords['y']))
-def curl(f):
-    return(d3.Differentiate(f@ey, coords['x'])-d3.Differentiate(f@ex, coords['y']))
-def divergence(f):
-    return(d3.Differentiate(f@ex, coords['x'])+d3.Differentiate(f@ey, coords['y']))
-#def curl(f):
-#    return(d3.Differentiate(f['g'][1], coords['x'])-d3.Differentiate(f['g'][0], coords['y']))
+chi=1       # ???
+nv=1/10     # ???
+Re=10
+#nv=(1/(chi**0.5*(Ly/2/np.pi)**1.5))**0.5
+#Re=np.sqrt(chi)/nv*(Ly/2/np.pi)**1.5
 
-problem = d3.IVP([u],namespace=locals())
-problem.add_equation(" d3.TimeDerivative(curl(u)) = - d3.DotProduct(u, d3.Gradient(curl(u))) + 1/Re*d3.Laplacian(curl(u)) + costerm ")
-problem.add_equation(" divergence(u) = 0 ")
-#problem.add_equation(" tau = 0")
-#problem.add_equation(" d3.TimeDerivative(omega) = - d3.DotProduct(u, d3.Gradient(curl(u))) + 1/Re*d3.Laplacian(curl(u)) + n*np.cos(n*y_field) ")
+def jacobian(f1, f2):
+    return (d3.Differentiate(f1, coords['x']) * d3.Differentiate(f2, coords['y']) -
+            d3.Differentiate(f1, coords['y']) * d3.Differentiate(f2, coords['x']))
+
+problem = d3.IVP([psi_prime,tau_psi],namespace=locals())
+problem.namespace.update({'t':problem.time})
+problem.add_equation("d3.TimeDerivative(lap(psi_prime))- nv * lap(lap(psi_prime)) +tau_psi=-jacobian(psi_prime, lap(psi_bar)) -jacobian(psi_bar, lap(psi_prime))-jacobian(psi_prime, lap(psi_prime)) +costerm -nv*lap(lap(psi_bar))")
+problem.add_equation("integ(psi_prime)=0")
+
 solver = problem.build_solver(timestepper)
 solver.stop_sim_time = stop_sim_time
 
-omega=curl(u)
-#costerm['g']['0'] = 0
-costerm['g'] = n * np.cos(n * y_grid) 
-#y_field['g']=coords['y']
-u['g'][0] += 2 * np.sin(2*np.pi/Lx*x/Lx)
+#psi_bar['g'] = - np.cos(n * y_grid)/(nv*n**3)
+psi_bar['g'] = (Re / n**2) * np.sin(n * y_grid)
+psi = psi_bar + psi_prime
+vorticity = -d3.Laplacian(d3.Laplacian(psi))
+costerm['g'] = n * np.cos(n * y_grid)
+#psi_prime['g'] += 0.1 * np.sin(2*np.pi*x_grid/Lx) * np.exp(-(y_grid-0.5)**2/0.01)
+#psi_prime['g'] += 0.1 * np.sin(2*np.pi*x_grid/Lx) * np.exp(-(y_grid+0.5)**2/0.01)
 
-#flow = d3.GlobalFlowProperty(solver, cadence=10)
-#flow.add_property(u, name='u')
+# initial random
+# Equation 3.1
+A = 0.1 * (Re / n**2)
+k_min, k_max = 2.5, 9.5
+kx_values = np.fft.fftfreq(Nx, d=Lx/Nx) * 2 * np.pi
+ky_values = np.fft.fftfreq(Ny, d=Ly/Ny) * 2 * np.pi
+kx_grid, ky_grid = np.meshgrid(kx_values, ky_values, indexing='ij')
+k_magnitude = np.sqrt(kx_grid**2 + ky_grid**2)
+valid_modes = (k_magnitude > k_min) & (k_magnitude < k_max)
+random_phases = np.exp(1j * 2 * np.pi * np.random.rand(*kx_grid.shape))
+#enst = np.sum((d3.Laplacian(psi_prime))['g']**2)
+psi_prime_hat = np.zeros_like(kx_grid, dtype=np.complex128)
+psi_prime_hat[valid_modes] = A * random_phases[valid_modes]
+psi_prime_initial = np.fft.ifft2(psi_prime_hat).real
+psi_prime['g'] = psi_prime_initial
+#psi_prime['g'] *= np.sqrt(1/enst)
+psi_prime['g'] += 0.05 * np.exp(-((x_grid - Lx/4)**2 + (y_grid - Ly/2)**2) / 0.01)   # Eq 3.2
+
+# Symmetric
+psi_prime['g'] = 0.5 * (psi_prime['g'] - np.flipud(psi_prime['g']))
+psi_prime['g'] = 0.5 * (psi_prime['g'] - np.fliplr(np.roll(psi_prime['g'], shift=int(Nx/4), axis=1)))
+
+def enforce_symmetries(field):
+    field['g'] = 0.5 * (field['g'] - np.flipud(field['g']))
+    field['g'] = 0.5 * (field['g'] - np.fliplr(np.roll(field['g'], shift=int(Nx/4), axis=1)))
+
+y_target = 21 * np.pi / 32
+vorticity_y_slice = d3.Interpolate(vorticity, coords['y'], y_target)
+
+snapshots = solver.evaluator.add_file_handler('snapshots', sim_dt=0.1, max_writes=10)
+snapshots.add_task(psi, name='psi')
+snapshots.add_task(vorticity, name='vorticity')
+snapshots.add_task(vorticity_y_slice, name='vorticity_y_slice')
+
 flow = d3.GlobalFlowProperty(solver, cadence=10)
-flow.add_property(omega, name='omega')
+flow.add_property(psi, name='psi')
 
 try:
     logger.info('Starting main loop')
-    fixed_timestep = 1e-2
+    fixed_timestep = 0.075
     while solver.proceed:
         timestep = fixed_timestep
         solver.step(timestep)
         if (solver.iteration-1) % 10 == 0:
-            max_omega = np.sqrt(flow.max('omega'))
-            logger.info('Iteration=%i, Time=%e, dt=%e, max(w)=%f' %(solver.iteration, solver.sim_time, timestep, max_omega))
+            enforce_symmetries(psi_prime)
+            max_psi = np.sqrt(flow.max('psi'))
+            logger.info('Iteration=%i, Time=%e, dt=%e, max(w)=%f' %(solver.iteration, solver.sim_time, timestep, max_psi))
 except:
     logger.error('Exception raised, triggering end of main loop.')
     raise
